@@ -229,7 +229,7 @@ if __name__ == "__main__":
 
     for iteration in tqdm(range(args.num_iterations), desc="Training"):
                     
-        if (iteration + 1) % 10 == 0:
+        if (iteration + 1) % 20 == 0:
             val_acc_logger = avg_acc_logger()
             val_bpd_logger = avg_logger()
             
@@ -251,6 +251,18 @@ if __name__ == "__main__":
                         "val_avg_accuracy": val_acc_logger.compute_accuracy(),
                         "training_iteration": iteration,
                         })
+            
+            # Save checkpoint every 10 iterations
+            ckpt_dir = os.path.join(os.path.dirname(__file__), "ckpts")
+            os.makedirs(ckpt_dir, exist_ok=True)
+            ckpt_path = os.path.join(ckpt_dir, f"checkpoint_iter{iteration+1}.ckpt")
+            torch.save({
+                "iteration": iteration + 1,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "val_accuracy": val_acc_logger.compute_accuracy(),
+            }, ckpt_path)
+            print(f"Saved checkpoint to {ckpt_path}")
                     
         if not is_required_training(args.method):
             break
@@ -270,6 +282,18 @@ if __name__ == "__main__":
             "training_batch_acc": is_correct.float().mean().item(),
             "training_iteration": iteration,
             })
+
+    # Save final checkpoint
+    if is_required_training(args.method):
+        ckpt_dir = os.path.join(os.path.dirname(__file__), "ckpts")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        final_ckpt_path = os.path.join(ckpt_dir, "final_model.ckpt")
+        torch.save({
+            "iteration": args.num_iterations,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+        }, final_ckpt_path)
+        print(f"Saved final model to {final_ckpt_path}")
 
     # After training, save probabilities on test set
     train_n_val_dataloader = DataLoader(

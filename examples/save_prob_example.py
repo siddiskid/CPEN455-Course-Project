@@ -27,6 +27,8 @@ from utils.download import _resolve_snapshot_path
 from utils.device import set_device
 from examples.bayes_inverse import save_probs
 
+DEFAULT_CKPT_PATH = os.path.join(os.path.dirname(__file__), "ckpts", "final_model.ckpt")
+
 if __name__ == "__main__":
     # random seed for reproducibility
     torch.manual_seed(0)
@@ -41,6 +43,7 @@ if __name__ == "__main__":
     # Training hyperparameters
     parser.add_argument("--num_iterations", type=int, default=100)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
+    parser.add_argument("--checkpoint", type=str, default=DEFAULT_CKPT_PATH, help="Path to model checkpoint")
     args = parser.parse_args()
 
     load_dotenv()
@@ -60,6 +63,16 @@ if __name__ == "__main__":
     # Load model
     model = LlamaModel(config)
     load_model_weights(model, checkpoint, cache_dir=model_cache_dir, device=device)
+    
+    # Load fine-tuned checkpoint if it exists
+    if os.path.exists(args.checkpoint):
+        print(f"Loading checkpoint from: {args.checkpoint}")
+        ckpt = torch.load(args.checkpoint, map_location=device, weights_only=True)
+        model.load_state_dict(ckpt["model_state_dict"])
+        print(f"Checkpoint loaded successfully! (trained for {ckpt.get('iteration', 'unknown')} iterations)")
+    else:
+        print(f"No checkpoint found at {args.checkpoint}, using base model weights")
+    
     model = model.to(device)
     
     test_dataset = CPEN455_2025_W1_Dataset(csv_path=args.test_dataset_path)
