@@ -26,6 +26,7 @@ from torch.nn import functional as F
 
 from autograder.dataset import CPEN455_2025_W1_Dataset, ENRON_LABEL_INDEX_MAP, prepare_subset
 from model import LlamaModel
+from model.prefix_llama import PrefixLlamaModel
 from utils.weight_utils import load_model_weights
 from model.config import Config
 from model.tokenizer import Tokenizer
@@ -57,7 +58,7 @@ def get_seq_log_prob(prompts, tokenizer, model, device):
     return gathered_log_prob.sum(dim=-1)
 
 
-METHOD_SET = ["zero_shot", "naive_prompting", "full_finetune"]
+METHOD_SET = ["zero_shot", "naive_prompting", "full_finetune", "prefix_tuning"]
 
 def is_required_training(method: str) -> bool:
     assert method in METHOD_SET, f"Method {method} not recognized. Choose from {METHOD_SET}."
@@ -149,8 +150,6 @@ def save_probs(args, model, tokenizer, dataloader, device, name = "test"):
                 handle.writelines(f"{idx},{ham},{spam}\n" for idx, ham, spam in rows)
 
 if __name__ == "__main__":
-    # random seed for reproducibility
-    torch.manual_seed(0)
     parser = argparse.ArgumentParser()
     parser.add_argument("--method", type=str, default="zero-shot", choices=METHOD_SET)
     
@@ -164,7 +163,13 @@ if __name__ == "__main__":
     # Training hyperparameters
     parser.add_argument("--num_iterations", type=int, default=100)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
+    parser.add_argument("--prefix_length", type=int, default=16, help="Number of prefix tokens for prefix tuning")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducibility")
+    parser.add_argument("--ckpt_suffix", type=str, default="", help="Suffix for checkpoint filenames (for ensemble)")
     args = parser.parse_args()
+    
+    # Set random seed
+    torch.manual_seed(args.seed)
 
     load_dotenv()
     
@@ -176,6 +181,11 @@ if __name__ == "__main__":
         run = wandb.init(
             project=os.getenv("PROJECT_NAME"), 
             name=f"bayes-inverse-{args.method}_msl{args.max_seq_len}",
+        )
+    elif args.method == "prefix_tuning":
+        run = wandb.init(
+            project=os.getenv("PROJECT_NAME"), 
+            name=f"bayes-inverse-{args.method}_msl{args.max_seq_len}_ni{args.num_iterations}_pl{args.prefix_length}",
         )
     else:
         run = wandb.init(
@@ -195,8 +205,17 @@ if __name__ == "__main__":
     config = Config._find_config_files(base_path)
 
     # Load model
-    model = LlamaModel(config)
-    load_model_weights(model, checkpoint, cache_dir=model_cache_dir, device=device)
+    base_model = LlamaModel(config)
+    load_model_weights(base_model, checkpoint, cache_dir=model_cache_dir, device=device)
+    
+    if args.method == "prefix_tuning":
+        model = PrefixLlamaModel(base_model, prefix_length=args.prefix_length)
+        print(f"Using prefix tuning with {args.prefix_length} prefix tokens")
+        num_prefix_params = sum(p.numel() for p in model.trainable_parameters())
+        print(f"Trainable prefix parameters: {num_prefix_params:,}")
+    else:
+        model = base_model
+    
     model = model.to(device)
 
     # Set up datasets and dataloaders
@@ -204,8 +223,9 @@ if __name__ == "__main__":
     training_dataset, val_dataset = prepare_subset(train_n_val_dataset, int(0.8 * len(train_n_val_dataset)), ratio_spam=0.5, return_remaining=True)
     test_dataset = CPEN455_2025_W1_Dataset(csv_path=args.test_dataset_path)
 
+    # Use all data for training (no validation split)
     training_dataloader = DataLoader(
-        training_dataset, 
+        train_n_val_dataset,  # Train on ALL 20 samples
         batch_size=args.batch_size, 
         shuffle=True
         )
@@ -222,7 +242,10 @@ if __name__ == "__main__":
         shuffle=False
         )
     
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
+    if args.method == "prefix_tuning":
+        optimizer = torch.optim.AdamW(model.trainable_parameters(), lr=args.learning_rate)
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
     
     if os.path.exists(args.prob_output_folder) == False:
         os.makedirs(args.prob_output_folder)
@@ -252,15 +275,16 @@ if __name__ == "__main__":
                         "training_iteration": iteration,
                         })
             
-            # Save checkpoint every 10 iterations
+            # Save checkpoint every 20 iterations
             ckpt_dir = os.path.join(os.path.dirname(__file__), "ckpts")
             os.makedirs(ckpt_dir, exist_ok=True)
-            ckpt_path = os.path.join(ckpt_dir, f"checkpoint_iter{iteration+1}.ckpt")
+            ckpt_path = os.path.join(ckpt_dir, f"checkpoint_iter{iteration+1}{args.ckpt_suffix}.ckpt")
             torch.save({
                 "iteration": iteration + 1,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "val_accuracy": val_acc_logger.compute_accuracy(),
+                "seed": args.seed,
             }, ckpt_path)
             print(f"Saved checkpoint to {ckpt_path}")
                     
@@ -287,11 +311,12 @@ if __name__ == "__main__":
     if is_required_training(args.method):
         ckpt_dir = os.path.join(os.path.dirname(__file__), "ckpts")
         os.makedirs(ckpt_dir, exist_ok=True)
-        final_ckpt_path = os.path.join(ckpt_dir, "final_model.ckpt")
+        final_ckpt_path = os.path.join(ckpt_dir, f"final_model{args.ckpt_suffix}.ckpt")
         torch.save({
             "iteration": args.num_iterations,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
+            "seed": args.seed,
         }, final_ckpt_path)
         print(f"Saved final model to {final_ckpt_path}")
 
